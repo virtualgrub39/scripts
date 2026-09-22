@@ -1,0 +1,91 @@
+#!/usr/bin/env janet
+
+(import spork/misc)
+(import spork/path)
+(import spork/argparse)
+
+(defn convert-file [path &opt out-dir bitrate]
+    (default out-dir ".")
+    (default bitrate "160k")
+
+    (def name (misc/trim-suffix ".flac" (path/basename path)))
+    (def out (path/join out-dir (string name ".opus")))
+
+    (os/spawn ["ffmpeg" "-nostdin" "-hide_banner" "-loglevel" "error"
+               "-i" path "-c:a" "libopus" "-b:a" bitrate "-vbr" "on"
+               out] :px)
+)
+
+(defn convert-dir [path &opt out bitrate max-jobs]
+    (def workers
+        (cond
+            (number? max-jobs) max-jobs
+            (string? max-jobs) (scan-number max-jobs)
+            (os/cpu-count)))
+
+    (default out (string (misc/trim-suffix "/" path) "_CONVERTED"))
+    (os/mkdir out)
+
+    (def flacs
+        (filter
+            (fn [p] (string/has-suffix? ".flac" (string/ascii-lower p)))
+            (os/dir path)
+        )
+    )
+
+    (print "Converting " (length flacs) " tracks using " workers " workers...")
+
+    (def chunks (partition workers flacs))
+    (each chunk chunks (do
+        (def procs @[])
+        (each file chunk (do
+            (def full-file (path/join path file))
+            (array/push procs (convert-file full-file out bitrate))
+        ))
+        (map os/proc-wait procs)
+    ))
+
+    (print "DONE! Output: " out)
+)
+
+(defn main [& args]
+    (when (= (length args) 1)
+        (print "Usage: flac2opus [-o out] [-b bitrate] [-j jobs] FILE|DIR ...")
+        (os/exit 1)
+    )
+    (def ap
+        (argparse/argparse
+            "Convert FLAC files to Opus."
+            :default {:kind :accumulate
+                      :help "File(s) or directory(ies) to convert"}
+            "out" {:short "o"
+                   :kind :option
+                   :help "Output dir (default: '.' for a file, '<dir>_CONVERTED' for a directory)"}
+            "bitrate" {:short "b"
+                       :kind :option
+                       :default "160k"
+                       :help "Opus bitrate"}
+            "jobs" {:short "j"
+                    :kind :option
+                    :help "Parallel workers when converting a directory"}))
+
+    (unless ap (os/exit 1))
+
+    (def targets (ap :default))
+    (when (empty? targets)
+        (print "Usage: flac2opus [-o out] [-b bitrate] [-j jobs] FILE|DIR ...")
+        (os/exit 1))
+
+    (def out (ap "out"))
+    (def bitrate (ap "bitrate"))
+    (def jobs (ap "jobs"))
+
+    (each target targets
+        (def info (os/stat target))
+        (if info
+            (match (info :mode)
+                :file      (os/proc-wait (convert-file target out bitrate))
+                :directory (convert-dir target out bitrate (and jobs (scan-number jobs)))
+                (print "Unsupported file type: " target))
+            (print "Unknown path: " target)))
+)

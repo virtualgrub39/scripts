@@ -1,0 +1,91 @@
+#!/bin/env janet
+
+(defn fail [msg]
+    (eprint (string "ERROR: " msg))
+    (os/exit 1))
+
+(defn main [& args]
+    (when (< (length args) 3)
+        (print "USAGE: " (args 0) " SRCDIR DSTDIR")
+        (os/exit 1)
+    )
+
+    (def srcdir (args 1))
+    (def dstdir (args 2))
+
+    # TODO: check if directory
+    (unless (os/stat srcdir)
+        (fail (string "directory `" srcdir "` does not exist."))
+    )
+
+    (def files @[])
+    (let [all-entries (sort (os/dir srcdir))]
+        (each entry all-entries
+            (def path (string srcdir "/" entry))
+            (def st (os/stat path))
+
+            (when (and st (not= (st :mode) :dir))
+                (array/push files entry))))
+
+    (when (empty? files)
+        (fail "source directory doesn't have any files."))
+
+    (def tmp-path (string "/tmp/renamenlink-" (os/time) ".tmp"))
+
+    (let [tmp-file (file/open tmp-path :w)]
+        (each file files
+            (file/write tmp-file file "\n"))
+        (file/close tmp-file))
+
+    (def editor (or (get (os/environ) "EDITOR") "vi"))
+    (os/execute [editor tmp-path] :p)
+
+    (def tmp-file (file/open tmp-path :r))
+    (def edited-content (or (file/read tmp-file :all) ""))
+    (file/close tmp-file)
+    (os/rm tmp-path)
+
+    (def lines (string/split "\n" edited-content))
+    (when (= "" (last lines))
+        (array/pop lines))
+
+    (when (not= (length files) (length lines))
+        (fail (string/format "line count mismatch; expected %d lines, got %d lines." (length files) (length lines))))
+
+    (os/execute ["mkdir" "-p" dstdir] :p)
+
+    (def actions @[])
+    (loop [i :range [0 (length files)]]
+        (def old-name (files i))
+        (def new-name (lines i))
+        (when (not (empty? new-name))
+            (array/push actions [old-name new-name]))) # TODO: more actions?
+
+    (when (empty? actions)
+        (fail "nothing to do."))
+    
+    (print "\nDRY RUN:")
+    (each [old new] actions
+        (print "  " old "\n    -> " new))
+
+    (file/write stdout "\nLOOKIN GOOD? [y/N]: ")
+    (file/flush stdout)
+
+    (def ans (string/trim (or (file/read stdin :line) "")))
+    (unless (= (string/ascii-lower ans) "y")
+        (print "\nABORTED")
+        (os/exit 0)
+    )
+
+    (print "")
+    (each [old new] actions
+        (def src-path (string srcdir "/" old))    
+        (def dst-path (string dstdir "/" new))
+        (try (do
+            (os/link src-path dst-path)
+            (print "LINKED `" new "`"))
+        ([err]
+            (eprint "FAILED: `" old "` -> " err))))
+
+    (print "DONE")
+)
